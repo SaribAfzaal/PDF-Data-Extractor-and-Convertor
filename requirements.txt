@@ -3,4 +3,7 @@ pytesseract>=0.3.10
 pypdfium2>=4.30
 openpyxl>=3.1
 Pillow>=10.0
+numpy>=1.26
 reportlab>=4.0
+streamlit>=1.40
+pandas>=2.0

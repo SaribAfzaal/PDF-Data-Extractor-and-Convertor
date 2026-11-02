@@ -1,13 +1,14 @@
 from pathlib import Path
 
 import pypdfium2
-from PIL import JpegImagePlugin
+from PIL import Image
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 OUT = Path(__file__).parent
+SCAN_DPI = 200
 
 EMPLOYEES_HEADER = ["ID", "Name", "Department", "City", "Salary (PKR)"]
 EMPLOYEES = [
@@ -70,9 +71,10 @@ def build_text_pdf(path):
 
 def build_scanned_pdf(source, path):
     document = pypdfium2.PdfDocument(str(source))
-    images = [document[i].render(scale=200 / 72).to_pil().convert("L").convert("RGB") for i in range(len(document))]
+    images = [document[i].render(scale=SCAN_DPI / 72).to_pil().convert("L").convert("RGB") for i in range(len(document))]
     document.close()
-    images[0].save(path, save_all=True, append_images=images[1:], resolution=200)
+    Image.preinit()
+    images[0].save(path, save_all=True, append_images=images[1:], resolution=SCAN_DPI)
 
 
 if __name__ == "__main__":

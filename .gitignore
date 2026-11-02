@@ -2,7 +2,9 @@ venv/
 __pycache__/
 *.pyc
 .env
-CLAUDE.md
-claude.md
-*.xlsx
 *.csv
+.streamlit/
+*.xlsx
+!sample_output.xlsx
+!sample_scanned_output.xlsx
+~$*.xlsx

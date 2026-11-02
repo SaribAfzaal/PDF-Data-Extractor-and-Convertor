@@ -1,17 +1,26 @@
 import argparse
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
 
+import numpy as np
 import pdfplumber
 import pypdfium2
+from PIL import Image
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 MIN_TEXT_CHARS = 20
+DARK_THRESHOLD = 160
+CELL_GAP_RATIO = 0.8
+WINDOWS_TESSERACT_PATHS = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+)
 HEADER_FILL = PatternFill("solid", start_color="1F4E78")
 HEADER_FONT = Font(bold=True, color="FFFFFF")
 THIN = Side(style="thin", color="BFBFBF")
@@ -105,7 +114,7 @@ def group_rows(words):
 def split_cells(words, height):
     cells = []
     for word in sorted(words, key=lambda w: w["left"]):
-        if cells and word["left"] - cells[-1]["right"] <= height:
+        if cells and word["left"] - cells[-1]["right"] <= height * CELL_GAP_RATIO:
             cells[-1]["text"] += " " + word["text"]
             cells[-1]["right"] = word["left"] + word["width"]
         else:
@@ -136,11 +145,60 @@ def assemble_ocr_table(table_rows):
     return clean_table(grid)
 
 
-def extract_ocr_page(image, lang):
+def locate_tesseract(pytesseract):
+    if shutil.which("tesseract"):
+        return
+    for candidate in WINDOWS_TESSERACT_PATHS:
+        if Path(candidate).is_file():
+            pytesseract.pytesseract.tesseract_cmd = candidate
+            return
+
+
+def cumulative(mask):
+    zero = np.zeros(mask.shape[:-1] + (1,), np.int32)
+    return np.concatenate([zero, np.cumsum(mask, axis=-1, dtype=np.int32)], axis=-1)
+
+
+def window_hits(mask, before, after):
+    size = mask.shape[-1]
+    total = cumulative(mask)
+    index = np.arange(size)
+    low = np.clip(index - before, 0, size)
+    high = np.clip(index + after + 1, 0, size)
+    return total[..., high] - total[..., low]
+
+
+def long_runs(dark, length, axis):
+    moved = np.moveaxis(dark, axis, -1)
+    total = cumulative(moved)
+    starts = np.zeros(moved.shape, bool)
+    starts[..., : moved.shape[-1] - length + 1] = (total[..., length:] - total[..., :-length]) == length
+    covered = window_hits(starts, length - 1, 0) > 0
+    return np.moveaxis(covered, -1, axis)
+
+
+def widen(mask, radius, axis):
+    moved = np.moveaxis(mask, axis, -1)
+    return np.moveaxis(window_hits(moved, radius, radius) > 0, -1, axis)
+
+
+def remove_gridlines(image, dpi):
+    gray = np.asarray(image.convert("L"))
+    dark = gray < DARK_THRESHOLD
+    length = max(dpi // 3, 20)
+    horizontal = long_runs(dark, length, 1)
+    vertical = long_runs(dark, length, 0)
+    lines = horizontal | (widen(horizontal, 2, 0) & dark) | vertical | (widen(vertical, 2, 1) & dark)
+    return Image.fromarray(np.where(lines, 255, gray).astype(np.uint8))
+
+
+def extract_ocr_page(image, lang, dpi=300):
     import pytesseract
 
+    locate_tesseract(pytesseract)
+    image = remove_gridlines(image, dpi)
     try:
-        data = pytesseract.image_to_data(image, lang=lang, output_type=pytesseract.Output.DICT)
+        data = pytesseract.image_to_data(image, lang=lang, config="--psm 3", output_type=pytesseract.Output.DICT)
     except pytesseract.TesseractNotFoundError:
         raise ExtractionError(
             "Tesseract OCR is not installed or not on PATH. Install it from "
@@ -153,7 +211,7 @@ def extract_ocr_page(image, lang):
         {"text": data["text"][i].strip(), "left": data["left"][i], "top": data["top"][i],
          "width": data["width"][i], "height": data["height"][i]}
         for i in range(len(data["text"]))
-        if data["text"][i].strip() and float(data["conf"][i]) > 0
+        if any(ch.isalnum() for ch in data["text"][i]) and float(data["conf"][i]) > 0
     ]
     if not words:
         return [], []
@@ -210,7 +268,7 @@ def extract_pdf(pdf_path, dpi=300, lang="eng", force_ocr=False):
                     tables, text = extract_text_page(page)
                     results.append(PageResult(number, "text", tables, text))
                 else:
-                    tables, text = extract_ocr_page(render_page(pdf_path, index, dpi), lang)
+                    tables, text = extract_ocr_page(render_page(pdf_path, index, dpi), lang, dpi)
                     results.append(PageResult(number, "ocr", tables, text))
             except ExtractionError:
                 raise
